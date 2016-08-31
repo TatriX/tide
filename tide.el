@@ -904,35 +904,75 @@ number."
 
 ;;; Import
 
-;; TODO: use project-info to supply initial completion list for import
-;; (defun tide-command:project-info ()
-;;   (tide-send-command-sync "projectInfo" `(:file ,buffer-file-name :needFileNameList t)))
+(defun tide-command:project-info ()
+  (tide-send-command-sync "projectInfo" `(:file ,buffer-file-name :needFileNameList t)))
 
 (defun tide-command:get-navigate-to-items (search-value)
   (tide-send-command-sync "navto"
                           `(:file ,buffer-file-name :searchValue ,search-value)))
 
+(defun tide-project-files ()
+  (let ((response (tide-command:project-info))
+        (root (tide-project-root)))
+    (when (tide-response-success-p response))
+    (remove-if-not (lambda (file)
+                     (string-prefix-p root file))
+                   (plist-get (plist-get response :body) :fileNames))))
 
-(defun tide-import (&optional search-value)
-  "Add es6 import value to the imports block"
-  (interactive (list (completing-read "Search for: " (list (symbol-at-point)))))
-  (let ((response (tide-command:get-navigate-to-items search-value)))
+(defun tide-mapcar-head (fn-head fn-rest list)
+      "Like MAPCAR, but applies a different function to the first element."
+      (if list
+          (cons (funcall fn-head (car list)) (mapcar fn-rest (cdr list)))))
+
+(defun tide-to-camel-case (s)
+  (mapconcat 'identity (tide-mapcar-head
+                        '(lambda (word) (downcase word))
+                        '(lambda (word) (capitalize (downcase word)))
+                        (split-string s "[-_]")) ""))
+
+(defun tide-project-modules ()
+  (mapcar (lambda (file)
+            (cons (tide-to-camel-case (file-name-base file))
+                  file))
+          (tide-project-files)))
+
+(defun tide-import ()
+  "Insert es6 import"
+  (interactive)
+  (let* ((project-modules (tide-project-modules))
+         (default-search-value (symbol-at-point))
+         (search-value (completing-read "Search for: "
+                                        (if default-search-value
+                                            (cons default-search-value project-modules)
+                                          project-modules)))
+         (response (tide-command:get-navigate-to-items search-value))
+         (module (--find (equal (car it) search-value) project-modules)))
     (when (tide-response-success-p response)
       (let* ((root (tide-project-root))
              ;; TODO: remove excluded in tsconfig.json directories
              (project-elements (remove-if-not (lambda (elem)
-                                                (string-prefix-p root (plist-get elem :file)))
+                                                (and (string-prefix-p root (plist-get elem :file))
+                                                     (not (equal (plist-get elem :kind)
+                                                                 "alias"))))
                                               (plist-get response :body)))
              (elements (sort project-elements
                              (lambda (a _)
                                (equal (plist-get a :matchKind) "exact"))))
              (completions (mapcar (lambda (elem)
-                                    (cons (format "%s : %s"
-                                                  (plist-get elem :name)
-                                                  (plist-get elem :kind))
-                                          elem))
-                                  elements))
-             (completion (completing-read "Import module: " completions)))
+                        (cons (format "%s : %s"
+                                      (plist-get elem :name)
+                                      (plist-get elem :kind))
+                              elem))
+                      elements))
+             (completion (completing-read "Import module: "
+                                          (progn
+                                            (when module
+                                              (setq completions
+                                                    (cons (list (concat (car module) " : module")
+                                                                :file (cdr module)
+                                                                :name (car module))
+                                                          completions)))
+                                              completions))))
         (when completion
           (let* ((elem (cdr (assoc completion completions)))
                  (path (replace-regexp-in-string
@@ -955,8 +995,8 @@ number."
                                       name
                                       path))
                     (insert (format "import %s from \"%s\";"
-                                  name
-                                  path))))))))))))
+                                    name
+                                    path))))))))))))
 
 ;;; Mode
 
